@@ -197,7 +197,8 @@ class Config(object):
 
                 for i, host in enumerate(hosts, start=1):
                     suffix = '%s%s' % (role.upper(), i)
-                    prefix = 'TESTHOST_' if role in domain.extra_roles else ''
+                    prefix = ('' if role in domain.static_roles
+                              else TESTHOST_PREFIX)
 
                     ext_hostname = host.external_hostname
                     env['%s%s%s' % (prefix, suffix,
@@ -292,12 +293,9 @@ class Domain(object):
         self.realm = self.name.upper()
         self.basedn = DN(*(('dc', p) for p in name.split('.')))
 
-        self._extra_roles = tuple()  # Serves as a cache for the domain roles
-        self._session_env = None
-
     @property
     def roles(self):
-        return self.static_roles + self.extra_roles
+        return sorted(set(host.role for host in self.hosts))
 
     @property
     def static_roles(self):
@@ -309,31 +307,21 @@ class Domain(object):
 
     @property
     def extra_roles(self):
-        if self._extra_roles:
-            return self._extra_roles
+        return [role for role in self.roles if role not in self.static_roles]
 
-        roles = ()
+    def _roles_from_env(self, env):
+        for role in self.static_roles:
+            yield role
 
-        # Extra roles can be defined via env variables of form TESTHOST_key_envX
-        for variable in self._session_env:
-            if variable.startswith('TESTHOST'):
-
-                variable_split = variable.split('_')
-
-                defines_extra_role = (
-                    variable.endswith(self._env) and
-                    # at least 3 parts, as in TESTHOST_key_env1
-                    len(variable_split) > 2 and
-                    # prohibit redefining roles
-                    variable_split[-2].lower() not in roles
-                    )
-
-                if defines_extra_role:
-                    key = '_'.join(variable_split[1:-1])
-                    roles += (key.lower(),)
-
-        self._extra_roles = roles
-        return roles
+        # Extra roles are defined via env variables of form TESTHOST_key_envX
+        seen = set()
+        for var in env:
+            if var.startswith(TESTHOST_PREFIX) and var.endswith(self._env):
+                variable_split = var.split('_')
+                role_name = '_'.join(variable_split[1:-1])
+                if role_name and role_name not in seen:
+                    yield role_name.lower()
+                    seen.add(role_name)
 
     @classmethod
     def from_env(cls, env, config, index, domain_type):
@@ -349,10 +337,9 @@ class Domain(object):
         master_env = '%s_env%s' % (master_role, index)
         hostname, dot, domain_name = env[master_env].partition('.')
         self = cls(config, domain_name, index, domain_type)
-        self._session_env = env
 
-        for role in self.roles:
-            prefix = 'TESTHOST_' if role in self.extra_roles else ''
+        for role in self._roles_from_env(env):
+            prefix = '' if role in self.static_roles else TESTHOST_PREFIX
             value = env.get('%s%s%s' % (prefix, role.upper(), self._env), '')
 
             for index, hostname in enumerate(value.split(), start=1):
